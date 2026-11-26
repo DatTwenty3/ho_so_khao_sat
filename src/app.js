@@ -78,7 +78,17 @@ async function run(fn) {
 /* ---------- Dữ liệu dẫn xuất ---------- */
 /* Biên bản được sửa tay lưu theo ngày + nội dung của dòng, để chèn/xoá dòng khác không lệch. */
 const editKey = row => row.date + '|' + row.content;
-const record = i => state.edits[editKey(state.schedule[i])] || suggestRecord(state.schedule, i, state);
+/* Số biên bản luôn theo STT, trừ khi người dùng tự gõ số khác. Bản sửa lưu từ trước
+   không có cờ numberEdited: '02' khi đó là số mặc định nên cũng thay theo STT. */
+function record(i) {
+  const edit = state.edits[editKey(state.schedule[i])];
+  const auto = suggestRecord(state.schedule, i, state);
+  if (!edit) return auto;
+  const own = (edit.numberEdited ?? edit.number !== '02') && String(edit.number).trim();
+  return own ? edit : { ...edit, number: auto.number };
+}
+/* Chèn hoặc xoá dòng thì STT các dòng phía sau dồn theo. */
+const shiftNo = (from, step) => state.schedule.slice(from).forEach(r => { if (r.stt) r.stt += step; });
 const diaryRows = () => state.schedule.filter(r => r.nk && r.date);
 const recordIdx = () => state.schedule.map((r, i) => i).filter(i => state.schedule[i].nt && state.schedule[i].date);
 const weekday = iso => iso ? ['Chủ nhật', 'Thứ Hai', 'Thứ Ba', 'Thứ Tư', 'Thứ Năm', 'Thứ Sáu', 'Thứ Bảy'][new Date(iso + 'T00:00:00Z').getUTCDay()] : '';
@@ -296,7 +306,7 @@ function renderSchedule() {
     };
     const area = key => field(key, el('textarea', { rows: Math.max(1, row[key].split('\n').length) }));
     tr.append(
-      el('td', { className: 'stt', textContent: i + 1 }),
+      el('td', { className: 'stt', textContent: rowNo(state.schedule, i) }),
       el('td', {}, field('date', el('input', { type: 'date' })), day),
       el('td', {}, chip('nk', 'Nhật ký'), chip('nt', 'Nghiệm thu')),
       el('td', {}, area('content')),
@@ -313,7 +323,9 @@ function insertRow(at) {
   const prev = state.schedule[at - 1];
   const d = prev && prev.date ? new Date(prev.date + 'T00:00:00Z') : new Date();
   if (prev) d.setUTCDate(d.getUTCDate() + 1);
-  state.schedule.splice(at, 0, { nt: false, nk: true, date: d.toISOString().slice(0, 10), content: '', qty: '' });
+  const stt = prev ? rowNo(state.schedule, at - 1) + 1 : 1;
+  shiftNo(at, 1);
+  state.schedule.splice(at, 0, { stt, nt: false, nk: true, date: d.toISOString().slice(0, 10), content: '', qty: '' });
   filter = 'all';
   $('search').value = '';
   $$('#filter button').forEach(b => b.classList.toggle('on', b.dataset.f === 'all'));
@@ -327,8 +339,9 @@ function insertRow(at) {
 }
 
 function removeRow(i) {
-  const row = state.schedule[i], key = editKey(row), edit = state.edits[key];
+  const row = state.schedule[i], key = editKey(row), edit = state.edits[key], no = rowNo(state.schedule, i);
   state.schedule.splice(i, 1);
+  shiftNo(i, -1);
   delete state.edits[key];
   state.dirty = true;
   persist();
@@ -337,7 +350,8 @@ function removeRow(i) {
     try { localStorage.removeItem(KEY); } catch { /* bỏ qua */ }
   }
   show();
-  toast(`Đã xoá dòng ${i + 1}.`, { ms: 7000, action: { label: 'Hoàn tác', run: () => {
+  toast(`Đã xoá dòng ${no}.`, { ms: 7000, action: { label: 'Hoàn tác', run: () => {
+    shiftNo(i, 1);
     state.schedule.splice(i, 0, row);
     if (edit) state.edits[key] = edit;
     persist();
@@ -356,7 +370,7 @@ function renderRecords() {
   const items = new Map();
   const paintItem = i => {
     const row = state.schedule[i], key = editKey(row), rec = record(i);
-    const title = el('b', {}, dmy(row.date));
+    const title = el('b', {}, `Số ${rec.number}/NT · ${dmy(row.date)}`);
     if (suggestRecord(state.schedule, i, state).warnings.length) title.append(el('span', { className: 'pill warn' }, icon('alert'), 'kiểm tra'));
     if (state.edits[key]) title.append(el('span', { className: 'pill edit', textContent: 'đã sửa' }));
     items.get(key).replaceChildren(title, el('span', { className: 'sub', textContent: lines(rec.subjects).join(' · ') || '(chưa có đối tượng)' }));
@@ -397,6 +411,9 @@ function renderEditor(i, repaint) {
   };
   const field = (text, node) => el('label', {}, text, node);
   const heading = (text, note = '') => el('h3', {}, text + ' ', el('small', { textContent: note }));
+  // để trống = quay về số theo STT
+  const numberInput = el('input', { type: 'text', value: rec.number, placeholder: suggestRecord(state.schedule, i, state).number,
+    oninput: e => { rec.number = e.target.value; rec.numberEdited = !!rec.number.trim(); touch(); } });
 
   const tbody = el('tbody');
   const drawItems = () => tbody.replaceChildren(...rec.items.map((it, j) => el('tr', {},
@@ -411,11 +428,11 @@ function renderEditor(i, repaint) {
     el('div', { className: 'editor-head' },
       el('h2', { textContent: `Biên bản ngày ${dmy(row.date)}` }),
       el('div', {}, reset, ' ',
-        el('button', { className: 'btn primary', onclick: () => run(async () => download(await makeRecord(rec), `BBNT ${rec.date}.docx`)) }, icon('download'), 'Tải biên bản này'))),
+        el('button', { className: 'btn primary', onclick: () => run(async () => download(await makeRecord(record(i)), `BBNT ${rec.date}.docx`)) }, icon('download'), 'Tải biên bản này'))),
     ...warnings.map(w => el('div', { className: 'notice' }, icon('alert'), el('span', { textContent: w }))),
     heading('Thông tin chung'),
     el('div', { className: 'fields' },
-      field('Số biên bản (…/NT)', input(rec, 'number')),
+      field('Số biên bản (…/NT)', numberInput),
       field('Ngày lập', input(rec, 'date', 'date')),
       field('Bắt đầu kiểm tra', input(rec, 'start', 'date')),
       field('Kết thúc kiểm tra', input(rec, 'end', 'date'))),
