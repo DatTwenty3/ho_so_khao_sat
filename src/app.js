@@ -78,7 +78,7 @@ async function run(fn) {
 /* ---------- Dữ liệu dẫn xuất ---------- */
 /* Biên bản được sửa tay lưu theo ngày + nội dung của dòng, để chèn/xoá dòng khác không lệch. */
 const editKey = row => row.date + '|' + row.content;
-/* Số biên bản luôn theo STT, trừ khi người dùng tự gõ số khác. Bản sửa lưu từ trước
+/* Số biên bản theo thứ tự dòng nghiệm thu, trừ khi người dùng tự gõ số khác. Bản sửa lưu từ trước
    không có cờ numberEdited: '02' khi đó là số mặc định nên cũng thay theo STT. */
 function record(i) {
   const edit = state.edits[editKey(state.schedule[i])];
@@ -87,18 +87,20 @@ function record(i) {
   const own = (edit.numberEdited ?? edit.number !== '02') && String(edit.number).trim();
   return own ? edit : { ...edit, number: auto.number };
 }
-/* Chèn hoặc xoá dòng thì STT các dòng phía sau dồn theo. */
-const shiftNo = (from, step) => state.schedule.slice(from).forEach(r => { if (r.stt) r.stt += step; });
 const diaryRows = () => state.schedule.filter(r => r.nk && r.date);
 const recordIdx = () => state.schedule.map((r, i) => i).filter(i => state.schedule[i].nt && state.schedule[i].date);
 const weekday = iso => iso ? ['Chủ nhật', 'Thứ Hai', 'Thứ Ba', 'Thứ Tư', 'Thứ Năm', 'Thứ Sáu', 'Thứ Bảy'][new Date(iso + 'T00:00:00Z').getUTCDay()] : '';
 const dayLabel = iso => iso ? `${weekday(iso)}, ${dmy(iso)}` : 'Chưa chọn ngày';
 
+const diaryNo = row => docNo(state.schedule, state.schedule.indexOf(row), 'nk');
+
+/* list: các cặp [số hồ sơ, ngày]. */
 function fileNames(list, prefix) {
   const seen = {};
-  return list.map(date => {
-    seen[date] = (seen[date] || 0) + 1;
-    return `${prefix} ${date}${seen[date] > 1 ? ` (${seen[date]})` : ''}.docx`;
+  return list.map(([no, date]) => {
+    const base = `${prefix} ${String(no).trim().replace(/[\/:*?"<>|]/g, '-')} ${date}`;
+    seen[base] = (seen[base] || 0) + 1;
+    return `${base}${seen[base] > 1 ? ` (${seen[base]})` : ''}.docx`;
   });
 }
 
@@ -108,9 +110,9 @@ const makeRecord = rec => buildDoc(templates.bb, fillRecordXml, rec, state);
 async function buildAll() {
   const out = new Map();
   const bytes = async blob => new Uint8Array(await blob.arrayBuffer());
-  const nk = diaryRows(), nkNames = fileNames(nk.map(r => r.date), 'NK');
+  const nk = diaryRows(), nkNames = fileNames(nk.map(r => [diaryNo(r), r.date]), 'NK');
   for (const [i, row] of nk.entries()) out.set('Nhật ký/' + nkNames[i], await bytes(await makeDiary(row)));
-  const recs = recordIdx().map(record), bbNames = fileNames(recs.map(r => r.date), 'BBNT');
+  const recs = recordIdx().map(record), bbNames = fileNames(recs.map(r => [r.number, r.date]), 'BBNT');
   for (const [i, rec] of recs.entries()) out.set('Biên bản nghiệm thu/' + bbNames[i], await bytes(await makeRecord(rec)));
   return out;
 }
@@ -281,13 +283,20 @@ function renderSchedule() {
     (filter === 'all' || row.nt) &&
     (!q || `${row.content}\n${row.qty}\n${row.date ? dmy(row.date) : ''}`.toLowerCase().includes(q)));
 
+  const painters = [];
+  const repaintChips = () => painters.forEach(paint => paint());
   $('rows').replaceChildren(...rows.map(([row, i]) => {
     const tr = el('tr', { className: row.nt ? 'nt' : '' });
     tr.dataset.i = i;
     const chip = (key, label) => {
       const b = el('button', { type: 'button', className: 'chip ' + key });
-      const paint = () => { b.replaceChildren(icon(row[key] ? 'check' : 'plus'), label); b.setAttribute('aria-pressed', String(!!row[key])); };
-      b.onclick = () => { row[key] = !row[key]; paint(); tr.className = row.nt ? 'nt' : ''; changed(); };
+      const paint = () => {
+        const no = row[key] && row.date ? ' ' + docNo(state.schedule, i, key) : '';
+        b.replaceChildren(icon(row[key] ? 'check' : 'plus'), label + no);
+        b.setAttribute('aria-pressed', String(!!row[key]));
+      };
+      b.onclick = () => { row[key] = !row[key]; repaintChips(); tr.className = row.nt ? 'nt' : ''; changed(); };
+      painters.push(paint);
       paint();
       return b;
     };
@@ -299,14 +308,14 @@ function renderSchedule() {
         const old = editKey(row);
         row[key] = node.value;
         if (state.edits[old] && editKey(row) !== old) { state.edits[editKey(row)] = state.edits[old]; delete state.edits[old]; }
-        if (key === 'date') day.textContent = weekday(row.date);
+        if (key === 'date') { day.textContent = weekday(row.date); repaintChips(); }
         changed();
       };
       return node;
     };
     const area = key => field(key, el('textarea', { rows: Math.max(1, row[key].split('\n').length) }));
     tr.append(
-      el('td', { className: 'stt', textContent: rowNo(state.schedule, i) }),
+      el('td', { className: 'stt', textContent: i + 1 }),
       el('td', {}, field('date', el('input', { type: 'date' })), day),
       el('td', {}, chip('nk', 'Nhật ký'), chip('nt', 'Nghiệm thu')),
       el('td', {}, area('content')),
@@ -323,9 +332,7 @@ function insertRow(at) {
   const prev = state.schedule[at - 1];
   const d = prev && prev.date ? new Date(prev.date + 'T00:00:00Z') : new Date();
   if (prev) d.setUTCDate(d.getUTCDate() + 1);
-  const stt = prev ? rowNo(state.schedule, at - 1) + 1 : 1;
-  shiftNo(at, 1);
-  state.schedule.splice(at, 0, { stt, nt: false, nk: true, date: d.toISOString().slice(0, 10), content: '', qty: '' });
+  state.schedule.splice(at, 0, { nt: false, nk: true, date: d.toISOString().slice(0, 10), content: '', qty: '' });
   filter = 'all';
   $('search').value = '';
   $$('#filter button').forEach(b => b.classList.toggle('on', b.dataset.f === 'all'));
@@ -339,9 +346,8 @@ function insertRow(at) {
 }
 
 function removeRow(i) {
-  const row = state.schedule[i], key = editKey(row), edit = state.edits[key], no = rowNo(state.schedule, i);
+  const row = state.schedule[i], key = editKey(row), edit = state.edits[key];
   state.schedule.splice(i, 1);
-  shiftNo(i, -1);
   delete state.edits[key];
   state.dirty = true;
   persist();
@@ -350,8 +356,7 @@ function removeRow(i) {
     try { localStorage.removeItem(KEY); } catch { /* bỏ qua */ }
   }
   show();
-  toast(`Đã xoá dòng ${no}.`, { ms: 7000, action: { label: 'Hoàn tác', run: () => {
-    shiftNo(i, 1);
+  toast(`Đã xoá dòng ${i + 1}.`, { ms: 7000, action: { label: 'Hoàn tác', run: () => {
     state.schedule.splice(i, 0, row);
     if (edit) state.edits[key] = edit;
     persist();
@@ -411,7 +416,7 @@ function renderEditor(i, repaint) {
   };
   const field = (text, node) => el('label', {}, text, node);
   const heading = (text, note = '') => el('h3', {}, text + ' ', el('small', { textContent: note }));
-  // để trống = quay về số theo STT
+  // để trống = quay về số tự đánh
   const numberInput = el('input', { type: 'text', value: rec.number, placeholder: suggestRecord(state.schedule, i, state).number,
     oninput: e => { rec.number = e.target.value; rec.numberEdited = !!rec.number.trim(); touch(); } });
 
@@ -428,7 +433,7 @@ function renderEditor(i, repaint) {
     el('div', { className: 'editor-head' },
       el('h2', { textContent: `Biên bản ngày ${dmy(row.date)}` }),
       el('div', {}, reset, ' ',
-        el('button', { className: 'btn primary', onclick: () => run(async () => download(await makeRecord(record(i)), `BBNT ${rec.date}.docx`)) }, icon('download'), 'Tải biên bản này'))),
+        el('button', { className: 'btn primary', onclick: () => run(async () => download(await makeRecord(record(i)), fileNames([[record(i).number, rec.date]], 'BBNT')[0])) }, icon('download'), 'Tải biên bản này'))),
     ...warnings.map(w => el('div', { className: 'notice' }, icon('alert'), el('span', { textContent: w }))),
     heading('Thông tin chung'),
     el('div', { className: 'fields' },
@@ -456,7 +461,7 @@ function renderDiaries() {
   $('diaries').replaceChildren(...rows.map(row => {
     const items = dayItems(row);
     return el('article', { className: 'card diary' },
-      el('header', {}, el('b', { textContent: dmy(row.date) }), el('span', { textContent: weekday(row.date) })),
+      el('header', {}, el('b', { textContent: `Số ${diaryNo(row)} · ${dmy(row.date)}` }), el('span', { textContent: weekday(row.date) })),
       el('ol', {}, ...(items.length ? items.map(it => {
         const li = el('li', {}, it.name + ' ');
         if (it.qty) li.append(el('span', { className: 'qty', textContent: `${it.qty} ${it.unit}`.trim() }));
@@ -473,7 +478,7 @@ function renderDiaries() {
           tr.scrollIntoView({ block: 'center' });
           tr.querySelector('textarea').focus({ preventScroll: true });
         } }, icon('pencil'), 'Sửa'),
-        el('button', { className: 'btn', onclick: () => run(async () => download(await makeDiary(row), `NK ${row.date}.docx`)) }, icon('download'), 'Tải')));
+        el('button', { className: 'btn', onclick: () => run(async () => download(await makeDiary(row), fileNames([[diaryNo(row), row.date]], 'NK')[0])) }, icon('download'), 'Tải')));
   }));
 }
 

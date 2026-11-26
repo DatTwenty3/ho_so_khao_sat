@@ -120,7 +120,6 @@ function scheduleFromSheet(rows) {
     month: col(h => h === 'THÁNG'), content: col(h => h.startsWith('ĐỐI TƯỢNG')), qty: col(h => h.startsWith('KL')),
   };
   for (const [k, v] of Object.entries(c)) if (!v) throw new Error('Thiếu cột trong Excel: ' + k);
-  const sttCol = col(h => h === 'STT');        // không bắt buộc: thiếu thì đánh số theo thứ tự dòng
   const above = rows.slice(0, hi + 1).flatMap(r => Object.values(r));
   let year = above.find(v => typeof v === 'number' && Number.isInteger(v) && v >= 2000 && v <= 2100) || new Date().getFullYear();
   const out = [];
@@ -131,9 +130,7 @@ function scheduleFromSheet(rows) {
     if (prevMonth && m < prevMonth) year++;
     prevMonth = m;
     const flag = v => String(v ?? '').trim() !== '';
-    const stt = parseInt(r[sttCol], 10);
     out.push({
-      ...(stt > 0 && { stt }),
       nt: flag(r[c.nt]), nk: flag(r[c.nk]),
       date: `${year}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`,
       content: String(r[c.content] ?? '').replace(/\r/g, '').trim(),
@@ -144,8 +141,9 @@ function scheduleFromSheet(rows) {
   return out;
 }
 
-/* STT của dòng: lấy theo cột STT trong Excel, không có thì theo vị trí. */
-const rowNo = (schedule, i) => schedule[i].stt ?? i + 1;
+/* Số hồ sơ: đếm từ trên xuống các dòng có đánh dấu cột đó (nk = nhật ký, nt = nghiệm thu). */
+const docNo = (schedule, idx, key) =>
+  String(schedule.slice(0, idx + 1).filter(r => r[key] && r.date).length).padStart(2, '0');
 
 /* ---------- Suy ra nội dung hồ sơ ---------- */
 const lines = s => String(s || '').split('\n').map(x => x.replace(/^\s*[-+•]\s*/, '').trim()).filter(Boolean);
@@ -232,7 +230,7 @@ function suggestRecord(schedule, idx, opt) {
     }
   }
   return {
-    number: String(rowNo(rows, idx)).padStart(2, '0'), numberEdited: false,
+    number: docNo(rows, idx, 'nt'), numberEdited: false,
     date: row.date, start: row.date, end: row.date,
     subjects: subjects.join('\n'), group: 'Khảo sát phần tuyến', items,
     conclusions: (items.length ? [...new Set(items.map(i => i.name))] : subjects).join('\n'),
