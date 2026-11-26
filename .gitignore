@@ -1,0 +1,13 @@
+# Dữ liệu thật: KHÔNG đưa lên repo công khai
+mau-that/
+ho-so-khao-sat.html
+*.json
+*.zip
+*.docx
+*.xlsx
+!mau/nhat-ky.docx
+!mau/bien-ban-nghiem-thu.docx
+!mau/lich-mau.xlsx
+
+__pycache__/
+.claude/
